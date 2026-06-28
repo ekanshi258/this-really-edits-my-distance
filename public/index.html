@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Distance — Word Graph</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div>loading graph…</div>
+
+<div id="cy" aria-label="Miles to go, before I sleep."></div>
+
+<div class="panel" id="header">
+  <div id="header-title">Miles to go, before I sleep.</div>
+  <div id="header-sub">Words within <span id="t-label">1</span> edit of each other</div>
+  <div id="header-stats"></div>
+</div>
+
+<div class="panel" id="controls">
+  <div>
+    <div class="ctrl-label">Search</div>
+    <input type="text" id="search-input" placeholder="find a word…" autocomplete="off" spellcheck="false">
+  </div>
+
+  <hr class="ctrl-divider">
+
+  <div>
+    <div class="ctrl-label">Threshold</div>
+    <div class="threshold-row">
+      <button class="t-btn active" data-t="1">distance 1</button>
+      <button class="t-btn" data-t="2">distance 2</button>
+    </div>
+  </div>
+
+  <hr class="ctrl-divider">
+
+  <div>
+    <div class="ctrl-label">Add word</div>
+    <input type="text" id="add-input" placeholder="any word…" autocomplete="off" spellcheck="false">
+    <button class="add-btn" id="add-btn">Add to graph</button>
+  </div>
+</div>
+
+<div class="panel" id="info">
+  <div id="info-word"></div>
+  <div id="info-degree"></div>
+  <div id="info-neighbors"></div>
+  <button id="info-clear">clear selection</button>
+</div>
+
+<script>
+// ── Levenshtein (client-side) ─────────────────────────────────────────────
+function lev(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  if (a.length > b.length) { const t = a; a = b; b = t; }
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = a[i-1] === b[j-1]
+        ? prev[j-1]
+        : 1 + Math.min(prev[j-1], curr[j-1], prev[j]);
+    }
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
+// ── State ─────────────────────────────────────────────────────────────────
+let graph = null;    // raw JSON: { nodes, edges, threshold }
+let cy = null;
+let currentThreshold = 1;
+let t2EdgesCache = null;   // lazily computed on first switch to threshold 2
+let selectedId = null;
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+fetch('./graph.json')
+  .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+  .then(data => {
+    graph = data;
+    currentThreshold = data.threshold;
+    buildCytoscape(data);
+  })
+  .catch(err => {
+    document.getElementById('loading').textContent = `Could not load graph.json — ${err.message}`;
+  });
+
+// ── Build Cytoscape ───────────────────────────────────────────────────────
+function buildCytoscape(data) {
+  const elements = [];
+  data.nodes.forEach((w, i) => {
+    elements.push({ group: 'nodes', data: { id: w, label: w, idx: i } });
+  });
+  data.edges.forEach(([i, j]) => {
+    elements.push({ group: 'edges', data: {
+      id: `e-${i}-${j}`, source: data.nodes[i], target: data.nodes[j], dist: 1
+    }});
+  });
+
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements,
+    style: cyStyles(),
+    layout: layoutCfg(false),
+    minZoom: 0.15,
+    maxZoom: 5,
+    wheelSensitivity: 0.25,
+  });
+
+  cy.on('layoutstop', () => {
+    document.getElementById('loading').classList.add('hidden');
+    updateStats();
+    syncThresholdBtns();
+    document.getElementById('t-label').textContent = currentThreshold;
+  });
+
+  bindInteractions();
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────
+function cyStyles() {
+  return [
+    {
+      selector: 'node',
+      style: {
+        'label': 'data(label)',
+        'font-family': 'JetBrains Mono, monospace',
+        'font-size': '11px',
+        'font-weight': '400',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'color': '#1A1A18',
+        'background-color': '#FFFFFF',
+        'border-width': 1,
+        'border-color': '#C4C2BB',
+        'width': 'label',
+        'height': 'label',
+        'padding': '7px',
+        'shape': 'roundrectangle',
+        'transition-property': 'background-color, border-color, border-width, color, opacity',
+        'transition-duration': '120ms',
+      }
+    },
+    {
+      selector: 'edge',
+      style: {
+        'width': 1,
+        'line-color': '#D5D3CE',
+        'curve-style': 'straight',
+        'opacity': 0.9,
+        'transition-property': 'line-color, width, opacity',
+        'transition-duration': '120ms',
+      }
+    },
+    { selector: 'node.selected', style: {
+        'background-color': '#D4537E',
+        'border-color': '#D4537E',
+        'color': '#FFFFFF',
+    }},
+    { selector: 'node.neighbor', style: {
+        'background-color': '#E1F5EE',
+        'border-color': '#5DCAA5',
+        'border-width': 1.5,
+        'color': '#0F6E56',
+    }},
+    { selector: 'edge.active', style: {
+        'line-color': '#D4537E',
+        'width': 1.5,
+        'opacity': 1,
+    }},
+    { selector: 'node.faded', style: { 'opacity': 0.08 }},
+    { selector: 'edge.faded', style: { 'opacity': 0.05 }},
+    { selector: 'node.added', style: {
+        'border-style': 'dashed',
+        'border-color': '#D4537E',
+        'border-width': 1.5,
+    }},
+    { selector: 'node.matched', style: {
+        'background-color': '#FAEEDA',
+        'border-color': '#EF9F27',
+        'border-width': 1.5,
+        'color': '#854F0B',
+    }},
+  ];
+}
+
+function layoutCfg(animate) {
+  return {
+    name: 'cose',
+    animate,
+    animationDuration: animate ? 500 : 0,
+    fit: true,
+    padding: 60,
+    randomize: false,
+    componentSpacing: 90,
+    nodeRepulsion: 420000,
+    nodeOverlap: 8,
+    idealEdgeLength: 75,
+    edgeElasticity: 100,
+    nestingFactor: 5,
+    gravity: 55,
+    numIter: 1000,
+    initialTemp: 200,
+    coolingFactor: 0.95,
+    minTemp: 1.0,
+  };
+}
+
+// ── Interactions ──────────────────────────────────────────────────────────
+function bindInteractions() {
+  cy.on('tap', 'node', e => {
+    const node = e.target;
+    if (selectedId === node.id()) { clearSelection(); return; }
+    selectNode(node);
+  });
+  cy.on('tap', e => { if (e.target === cy) clearSelection(); });
+}
+
+function selectNode(node) {
+  selectedId = node.id();
+  const neighbors = node.neighborhood('node');
+  const edges = node.connectedEdges();
+  cy.elements().removeClass('selected neighbor faded active matched');
+  cy.nodes().addClass('faded');
+  cy.edges().addClass('faded');
+  node.removeClass('faded').addClass('selected');
+  neighbors.removeClass('faded').addClass('neighbor');
+  edges.removeClass('faded').addClass('active');
+  showInfo(node, neighbors);
+}
+
+function clearSelection() {
+  selectedId = null;
+  cy.elements().removeClass('selected neighbor faded active matched');
+  document.getElementById('info').style.display = 'none';
+}
+
+function showInfo(node, neighbors) {
+  const word = node.data('label');
+  const nWords = neighbors.map(n => n.data('label')).sort();
+  document.getElementById('info-word').textContent = word;
+  document.getElementById('info-degree').textContent =
+    `${nWords.length} neighbour${nWords.length !== 1 ? 's' : ''}`;
+  document.getElementById('info-neighbors').innerHTML =
+    nWords.map(w => `<span class="neighbor-tag">${w}</span>`).join('');
+  document.getElementById('info').style.display = 'block';
+}
+
+document.getElementById('info-clear').addEventListener('click', clearSelection);
+
+// ── Search ────────────────────────────────────────────────────────────────
+document.getElementById('search-input').addEventListener('input', function() {
+  const q = this.value.trim().toLowerCase();
+  if (!cy) return;
+  cy.elements().removeClass('matched faded selected neighbor active');
+  if (!q) return;
+  const matches = cy.nodes().filter(n => n.data('label').startsWith(q));
+  if (matches.length) {
+    cy.nodes().addClass('faded');
+    cy.edges().addClass('faded');
+    matches.removeClass('faded').addClass('matched');
+    cy.animate({ center: { eles: matches.first() }, zoom: Math.min(cy.zoom(), 2.5) }, { duration: 350 });
+  }
+});
+
+// ── Threshold toggle ──────────────────────────────────────────────────────
+document.querySelectorAll('.t-btn').forEach(btn => {
+  btn.addEventListener('click', async function() {
+    const t = parseInt(this.dataset.t);
+    if (t === currentThreshold || !cy) return;
+    currentThreshold = t;
+    syncThresholdBtns();
+    document.getElementById('t-label').textContent = t;
+    clearSelection();
+
+    if (t === 1) {
+      // Remove distance-2 edges
+      cy.edges('[dist = 2]').remove();
+    } else {
+      // Lazily compute threshold-2 edges on first switch
+      if (!t2EdgesCache) {
+        t2EdgesCache = computeT2Edges();
+      }
+      cy.add(t2EdgesCache);
+    }
+
+    updateStats();
+  });
+});
+
+function computeT2Edges() {
+  const words = graph.nodes;
+  const n = words.length;
+  const existing = new Set(graph.edges.map(([i, j]) => `${i}-${j}`));
+  const newEdges = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (existing.has(`${i}-${j}`)) continue;
+      if (Math.abs(words[i].length - words[j].length) > 2) continue;
+      if (lev(words[i], words[j]) === 2) {
+        newEdges.push({ group: 'edges', data: {
+          id: `e-${i}-${j}`, source: words[i], target: words[j], dist: 2
+        }});
+      }
+    }
+  }
+  return newEdges;
+}
+
+function syncThresholdBtns() {
+  document.querySelectorAll('.t-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.t) === currentThreshold)
+  );
+}
+
+// ── Add word ──────────────────────────────────────────────────────────────
+document.getElementById('add-btn').addEventListener('click', addWordFromInput);
+document.getElementById('add-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addWordFromInput();
+});
+
+function addWordFromInput() {
+  const input = document.getElementById('add-input');
+  const word = input.value.trim().toLowerCase();
+  if (!word || !cy || !graph) return;
+
+  if (!/^[a-z]+$/.test(word)) {
+    input.classList.add('error');
+    setTimeout(() => input.classList.remove('error'), 800);
+    return;
+  }
+
+  // If already in graph, just navigate to it
+  if (graph.nodes.includes(word)) {
+    const node = cy.getElementById(word);
+    cy.animate({ center: { eles: node }, zoom: 3 }, { duration: 350 });
+    selectNode(node);
+    input.value = '';
+    return;
+  }
+
+  // Find neighbors within current threshold
+  const neighborIdxs = graph.nodes.reduce((acc, w, i) => {
+    if (Math.abs(w.length - word.length) > currentThreshold) return acc;
+    if (lev(w, word) <= currentThreshold) acc.push(i);
+    return acc;
+  }, []);
+
+  // Add node
+  graph.nodes.push(word);
+  cy.add({ group: 'nodes', data: { id: word, label: word }, classes: 'added' });
+
+  // Add edges
+  const newEdgeData = neighborIdxs.map(i => ({
+    group: 'edges',
+    data: { id: `e-${word}-${i}`, source: word, target: graph.nodes[i], dist: 1 }
+  }));
+  if (newEdgeData.length) cy.add(newEdgeData);
+
+  // Position near first neighbor (or near center)
+  const newNode = cy.getElementById(word);
+  if (neighborIdxs.length > 0) {
+    const anchor = cy.getElementById(graph.nodes[neighborIdxs[0]]).position();
+    newNode.position({ x: anchor.x + 80, y: anchor.y - 40 });
+  }
+
+  // Gentle re-layout around the new node without refitting the whole graph
+  cy.layout({ ...layoutCfg(true), fit: false, numIter: 300, gravity: 20 }).run();
+
+  selectNode(newNode);
+  updateStats();
+  input.value = '';
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────
+function updateStats() {
+  if (!cy) return;
+  const n = cy.nodes().length;
+  const e = cy.edges().length;
+  document.getElementById('header-stats').textContent = `${n} words · ${e} edges`;
+}
+</script>
+</body>
+</html>
