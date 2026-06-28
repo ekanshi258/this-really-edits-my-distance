@@ -1,2 +1,3 @@
 build_libs/.cache
 public/graph.json
+.DS_Store

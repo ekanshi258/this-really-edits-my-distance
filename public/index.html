@@ -9,15 +9,18 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
 </head>
 <body>
 
 <div id="loading"><div class="spinner"></div>loading graph…</div>
 
-<div id="cy" aria-label="Miles to go, before I sleep."></div>
+<div id="cy" aria-label="Levenshtein word graph"></div>
 
 <div class="panel" id="header">
-  <div id="header-title">Miles to go, before I sleep.</div>
+  <div id="header-title">Edit Distance</div>
   <div id="header-sub">Words within <span id="t-label">1</span> edit of each other</div>
   <div id="header-stats"></div>
 </div>
@@ -55,6 +58,8 @@
 </div>
 
 <script>
+cytoscape.use(cytoscapeFcose);
+
 // ── Levenshtein (client-side) ─────────────────────────────────────────────
 function lev(a, b) {
   if (a === b) return 0;
@@ -194,23 +199,22 @@ function cyStyles() {
 
 function layoutCfg(animate) {
   return {
-    name: 'cose',
+    name: 'fcose',
     animate,
     animationDuration: animate ? 500 : 0,
     fit: true,
     padding: 60,
     randomize: false,
-    componentSpacing: 90,
-    nodeRepulsion: 420000,
-    nodeOverlap: 8,
-    idealEdgeLength: 75,
-    edgeElasticity: 100,
-    nestingFactor: 5,
-    gravity: 55,
-    numIter: 1000,
-    initialTemp: 200,
-    coolingFactor: 0.95,
-    minTemp: 1.0,
+    quality: 'default',       // 'draft' (fastest) | 'default' | 'proof' (slowest)
+    packComponents: true,     // pack disconnected components tightly
+    nodeRepulsion: 4500,
+    idealEdgeLength: 80,
+    edgeElasticity: 0.45,
+    nestingFactor: 0.1,
+    gravity: 0.25,
+    gravityRange: 3.8,
+    numIter: 2500,
+    nodeDimensionsIncludeLabels: true,
   };
 }
 
@@ -373,7 +377,7 @@ function addWordFromInput() {
   }
 
   // Gentle re-layout around the new node without refitting the whole graph
-  cy.layout({ ...layoutCfg(true), fit: false, numIter: 300, gravity: 20 }).run();
+  cy.layout({ ...layoutCfg(true), fit: false, numIter: 500, gravity: 0.1 }).run();
 
   selectNode(newNode);
   updateStats();
